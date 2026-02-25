@@ -55,6 +55,10 @@ class CarlaEnv:
 
         # dataset collection
         collect_dataset: bool = False,
+        # RL / online camera observation (no dataset saving)
+        enable_camera: bool = False,
+        enable_lane_invasion_sensor: bool = False,
+        enable_collision_sensor: bool = False,
         dataset_dir: str = "dataset",
         dataset_run_name: Optional[str] = None,
         dataset_save_every: int = 5,
@@ -147,6 +151,9 @@ class CarlaEnv:
 
         # dataset collection
         self.collect_dataset = bool(collect_dataset)
+        self.enable_camera = bool(enable_camera)
+        self.enable_lane_invasion_sensor = bool(enable_lane_invasion_sensor)
+        self.enable_collision_sensor = bool(enable_collision_sensor)
         self.dataset_dir = str(dataset_dir)
         self.dataset_run_name = dataset_run_name
         self.dataset_save_every = max(int(dataset_save_every), 1)
@@ -160,6 +167,9 @@ class CarlaEnv:
 
         self._original_world_settings: Optional[carla.WorldSettings] = None
         self._image_queue: Optional["queue.Queue[carla.Image]"] = None
+        self._cached_image: Optional[carla.Image] = None
+        self._lane_invasion_queue: Optional["queue.Queue[Any]"] = None
+        self._collision_queue: Optional["queue.Queue[Any]"] = None
         self._labels_fp = None
         self._dataset_run_dir: Optional[Path] = None
         self._dataset_images_dir: Optional[Path] = None
@@ -195,8 +205,11 @@ class CarlaEnv:
         # 清理旧车辆和传感器（幂等清理，避免重复destroy报错）
         self._safe_destroy_actors()
 
+        # 根据需要应用世界设置（同步模式/固定步长）
         if self.collect_dataset:
             self._apply_world_settings_for_dataset()
+        else:
+            self._apply_world_settings(self.synchronous_mode)
         
         # 生成车辆出生点（默认固定；可设置为随机）
         spawn_points = self.map.get_spawn_points()
@@ -208,6 +221,14 @@ class CarlaEnv:
 
         if self.collect_dataset:
             self._setup_dataset_sensors()
+        else:
+            if self.enable_camera:
+                self._setup_rgb_camera_sensor()
+
+        if self.enable_lane_invasion_sensor:
+            self._setup_lane_invasion_sensor()
+        if self.enable_collision_sensor:
+            self._setup_collision_sensor()
         
         # 设置初始速度
         self.vehicle.set_target_velocity(carla.Vector3D(0, 0, 0))
@@ -320,7 +341,19 @@ class CarlaEnv:
             except RuntimeError:
                 distance_to_goal = None
         
+        frame = None
+        sim_time = None
+        try:
+            snapshot = self.world.get_snapshot()
+            frame = int(snapshot.frame)
+            sim_time = float(snapshot.timestamp.elapsed_seconds)
+        except RuntimeError:
+            frame = None
+            sim_time = None
+
         info = {
+            'frame': frame,
+            'sim_time': sim_time,
             'location': self.vehicle.get_location(),
             'velocity': self.vehicle.get_velocity(),
             'acceleration': self.vehicle.get_acceleration(),
@@ -336,20 +369,32 @@ class CarlaEnv:
 
     def _apply_world_settings_for_dataset(self) -> None:
         """采集数据时建议开启同步模式，便于帧对齐。"""
+        desired_sync = True if self.synchronous_mode is None else bool(self.synchronous_mode)
+        self._apply_world_settings(desired_sync)
+
+    def _apply_world_settings(self, synchronous_mode: Optional[bool]) -> None:
+        """按需设置 Carla 世界同步模式与固定步长。
+
+        - synchronous_mode=None: 不改动当前世界设置（保持外部启动参数/已有设置）
+        - synchronous_mode=True: 开启同步模式并设置 fixed_delta_seconds
+        - synchronous_mode=False: 关闭同步模式并清空 fixed_delta_seconds
+        """
+        if synchronous_mode is None:
+            return
+
         try:
             if self._original_world_settings is None:
                 self._original_world_settings = self.world.get_settings()
         except RuntimeError:
             return
 
-        desired_sync = True if self.synchronous_mode is None else bool(self.synchronous_mode)
-        if not desired_sync:
-            return
-
-        settings = self.world.get_settings()
-        settings.synchronous_mode = True
-        settings.fixed_delta_seconds = float(self.fixed_delta_seconds)
         try:
+            settings = self.world.get_settings()
+            settings.synchronous_mode = bool(synchronous_mode)
+            if settings.synchronous_mode:
+                settings.fixed_delta_seconds = float(self.fixed_delta_seconds)
+            else:
+                settings.fixed_delta_seconds = None
             self.world.apply_settings(settings)
         except RuntimeError:
             return
@@ -376,6 +421,7 @@ class CarlaEnv:
         self._labels_fp = open(run_dir / "labels.jsonl", "a", encoding="utf-8")
 
         self._image_queue = queue.Queue(maxsize=32)
+        self._cached_image = None
 
         cam_bp = self.blueprint_lib.find('sensor.camera.rgb')
         cam_bp.set_attribute('image_size_x', str(self.camera_width))
@@ -406,6 +452,156 @@ class CarlaEnv:
                     pass
 
         camera.listen(_on_image)
+
+    def _setup_rgb_camera_sensor(self) -> None:
+        """创建 RGB 相机用于在线观测（不保存数据集）。"""
+        if self.vehicle is None:
+            return
+
+        self._image_queue = queue.Queue(maxsize=32)
+        self._cached_image = None
+
+        cam_bp = self.blueprint_lib.find('sensor.camera.rgb')
+        cam_bp.set_attribute('image_size_x', str(self.camera_width))
+        cam_bp.set_attribute('image_size_y', str(self.camera_height))
+        cam_bp.set_attribute('fov', str(self.camera_fov))
+
+        cam_transform = carla.Transform(
+            carla.Location(x=1.6, z=1.4),
+            carla.Rotation(pitch=-5.0),
+        )
+        camera = self.world.spawn_actor(cam_bp, cam_transform, attach_to=self.vehicle)
+        self.sensors['rgb_camera'] = camera
+
+        def _on_image(image: carla.Image):
+            if self._image_queue is None:
+                return
+            try:
+                self._image_queue.put_nowait(image)
+            except queue.Full:
+                try:
+                    _ = self._image_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._image_queue.put_nowait(image)
+                except queue.Full:
+                    pass
+
+        camera.listen(_on_image)
+
+    def _setup_lane_invasion_sensor(self) -> None:
+        if self.vehicle is None:
+            return
+
+        self._lane_invasion_queue = queue.Queue(maxsize=64)
+        bp = self.blueprint_lib.find('sensor.other.lane_invasion')
+        sensor = self.world.spawn_actor(bp, carla.Transform(), attach_to=self.vehicle)
+        self.sensors['lane_invasion'] = sensor
+
+        def _on_event(event: Any) -> None:
+            if self._lane_invasion_queue is None:
+                return
+            try:
+                self._lane_invasion_queue.put_nowait(event)
+            except queue.Full:
+                try:
+                    _ = self._lane_invasion_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._lane_invasion_queue.put_nowait(event)
+                except queue.Full:
+                    pass
+
+        sensor.listen(_on_event)
+
+    def _setup_collision_sensor(self) -> None:
+        if self.vehicle is None:
+            return
+
+        self._collision_queue = queue.Queue(maxsize=64)
+        bp = self.blueprint_lib.find('sensor.other.collision')
+        sensor = self.world.spawn_actor(bp, carla.Transform(), attach_to=self.vehicle)
+        self.sensors['collision'] = sensor
+
+        def _on_event(event: Any) -> None:
+            if self._collision_queue is None:
+                return
+            try:
+                self._collision_queue.put_nowait(event)
+            except queue.Full:
+                try:
+                    _ = self._collision_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._collision_queue.put_nowait(event)
+                except queue.Full:
+                    pass
+
+        sensor.listen(_on_event)
+
+    def pop_lane_invasion_events(self, *, max_events: int = 128) -> List[Any]:
+        q = self._lane_invasion_queue
+        if q is None:
+            return []
+        events: List[Any] = []
+        for _ in range(int(max_events)):
+            try:
+                events.append(q.get_nowait())
+            except queue.Empty:
+                break
+        return events
+
+    def pop_collision_events(self, *, max_events: int = 128) -> List[Any]:
+        q = self._collision_queue
+        if q is None:
+            return []
+        events: List[Any] = []
+        for _ in range(int(max_events)):
+            try:
+                events.append(q.get_nowait())
+            except queue.Empty:
+                break
+        return events
+
+    def get_rgb_image_for_frame(self, *, target_frame: int, timeout_s: float = 1.0) -> Optional[carla.Image]:
+        """严格按 frame 获取对应的相机图像。
+
+        返回 None 表示未拿到精确帧（例如队列溢出或超时）。
+        """
+        if self._image_queue is None:
+            return None
+
+        if self._cached_image is not None:
+            try:
+                if int(getattr(self._cached_image, 'frame', -1)) == int(target_frame):
+                    img = self._cached_image
+                    self._cached_image = None
+                    return img
+            except Exception:
+                self._cached_image = None
+
+        deadline = datetime.now().timestamp() + float(timeout_s)
+        while datetime.now().timestamp() < deadline:
+            remaining = max(0.01, deadline - datetime.now().timestamp())
+            try:
+                img = self._image_queue.get(timeout=remaining)
+            except queue.Empty:
+                break
+
+            f = int(getattr(img, 'frame', -1))
+            if f < int(target_frame):
+                continue
+            if f == int(target_frame):
+                return img
+
+            # f > target_frame: 先缓存，等待下一次调用
+            self._cached_image = img
+            return None
+
+        return None
 
     def _dataset_save_sample(self, obs: np.ndarray) -> None:
         if self.vehicle is None or self._image_queue is None or self._labels_fp is None:
@@ -830,6 +1026,9 @@ class CarlaEnv:
                 self._labels_fp = None
 
         self._image_queue = None
+        self._cached_image = None
+        self._lane_invasion_queue = None
+        self._collision_queue = None
 
         if self.vehicle is not None:
             try:

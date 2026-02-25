@@ -1,397 +1,283 @@
-# Carla Gym风格环境封装
+# CARLA PathTracking（数据采集 → 图像到局部路径 → 闭环控制 → RL 微调）
 
-一个功能完整的Carla强化学习环境封装，提供Gym风格的API和PID控制器实现。
+这个项目包含两条主线：
 
-## 功能特性
+1) **经典控制 / Gym 风格 CARLA 环境**：`carla_env.py` + `pid_controller.py`，支持 `reset()/step()`、自定义奖励、全局路线规划、调试绘制等。
+2) **神经路径规划（image → local path）**：采集 `labels.jsonl` + RGB 图像，监督训练 Baseline/Transformer，闭环把网络输出喂给 Pure Pursuit + Speed PID，再可选用 PPO 在 CARLA 里做在线微调。
 
-✅ **Gym风格API** - 熟悉的 `reset()`、`step()` 接口
-✅ **自定义奖励函数** - 灵活定制你的奖励逻辑
-✅ **PID控制器** - 开箱即用的车道保持和速度控制
-✅ **完整的观测空间** - 多维度的车辆状态信息
-✅ **易于集成** - 与任何RL框架完美配合
+推荐从 [START_HERE.md](START_HERE.md) 开始（3 分钟跑通）。
 
-## 项目结构
+---
+
+## 目录结构（最新版）
 
 ```
-.
-├── carla_env.py           # 主环境封装类
-├── pid_controller.py      # PID控制器实现
-├── example.py            # 使用示例
-├── USAGE_GUIDE.py        # 详细使用指南
-└── README.md             # 本文件
+PathTracking/
+├── carla_env.py                      # Gym 风格 CARLA 环境（支持采集/相机/碰撞/压线）
+├── pid_controller.py                 # Pure Pursuit + 速度 PID 等控制器
+├── example.py                        # 采集数据 + 基础运行示例（键盘转向/自动定速）
+├── test_nn_path_planner_control.py   # 闭环测试：图像→Transformer→控制器→CARLA
+├── train_path_planner_baseline.py    # 监督学习：CNN baseline
+├── train_path_planner_transformer.py # 监督学习：Transformer
+├── viz_path_planner_predictions.py   # 预测可视化（9宫格 + 图像 inset）
+├── train_path_planner_rl_ppo.py      # PPO 微调：Actor=Transformer（预训练），Critic=独立 CNN
+├── rl_carla_path_env.py              # PPO 训练用 Gym 环境（图像观测 + 路径动作）
+├── rl_transformer_policy.py          # SB3 自定义策略（actor/critic + 高斯探索）
+├── nn_path_planner/                  # 数据集/几何/网络/损失/指标
+├── dataset/                          # 采集输出（run_xxx/labels.jsonl + images/）
+├── checkpoints_transformer/          # Transformer 权重（SL + RL）
+└── checkpoints_baseline/             # Baseline 权重
 ```
 
-## 快速开始
+---
 
-### 安装依赖
+## 快速开始（Windows）
 
-```bash
-# 确保已安装 Carla Python API
-pip install carla numpy
+### 0) 环境前置
 
-# 或者如果从CARLA源码编译
-export PYTHONPATH=$PYTHONPATH:/home/user/carla/PythonAPI/carla/dist/carla-X.X.X-py3.x-linux-x86_64.egg
+- **CARLA Server**（例如 0.9.15）
+- **Python 与 CARLA PythonAPI 版本必须匹配**（Windows 上常见问题）
+
+建议先确认你当前 conda 环境已激活（你现在的工作区看起来是 `conda activate carla`）。
+
+### 1) 启动 CARLA Server
+
+在另一个终端里：
+
+```powershell
+cd D:\CARLA_0.9.15\WindowsNoEditor
+./CarlaUE4.exe -RenderOffScreen
 ```
 
-### 启动CARLA服务器
+### 2) 跑通采集/控制示例
 
-```bash
-# 方式1: 带UI运行
-./CarlaUE4.sh
-
-# 方式2: 无UI运行（更快）
-./CarlaUE4.sh -RenderOffScreen
+```powershell
+cd d:\ZDY_Drift\PathTracking
+python example.py
 ```
 
-### 基本使用
+`example.py` 默认会启用数据采集（见文件顶部配置项，如 `COLLECT_DATASET=True`、`DATASET_DIR=dataset`）。
+
+---
+
+## 端到端工作流（推荐顺序）
+
+### A. 采集数据（RGB + 参考轨迹标签）
+
+入口：`example.py`
+
+采集输出目录形如：
+
+```
+dataset/
+  run_YYYYMMDD_HHMMSS/
+    labels.jsonl
+    images/
+      00001234.png
+      ...
+```
+
+`labels.jsonl` 每行是一条样本，至少需要字段：
+
+- `image`: 相对路径（例如 `images/00001234.png`）
+- `future_route_vehicle`: 未来路径点列表（车辆坐标系）`[{"x":..,"y":..}, ...]`
+
+如果你用 Transformer 的 `--use_state`，还会读取：
+
+- `vehicle.x`, `vehicle.y`, `vehicle.yaw_deg`（用于构造 `[x/scale, y/scale, sin(yaw), cos(yaw)]`）
+
+### B. 监督训练（Baseline / Transformer）
+
+#### Baseline（CNN）
+
+```powershell
+python train_path_planner_baseline.py --labels dataset\run_xxx\labels.jsonl --epochs 20
+```
+
+输出：
+
+- `checkpoints_baseline/last.pt`
+- `checkpoints_baseline/best.pt`（有验证集时）
+
+提示：该脚本默认 `--device cuda`。如果你没有 GPU 或想用 CPU 训练：
+
+```powershell
+python train_path_planner_transformer.py --labels dataset\run_xxx\labels.jsonl --epochs 20 --device cpu
+```
+#### Transformer
+
+```powershell
+python train_path_planner_transformer.py --labels dataset\run_xxx\labels.jsonl --epochs 20
+```
+
+可选：加入额外状态输入（位置/朝向）：
+
+```powershell
+python train_path_planner_transformer.py --labels dataset\run_xxx\labels.jsonl --epochs 20 --use_state
+```
+
+输出：
+
+- `checkpoints_transformer/last.pt`
+- `checkpoints_transformer/best.pt`（有验证集时）
+
+训练指标（验证集）：
+
+- `loss`（点回归 + 平滑正则 + remaining_length 辅助损失）
+- `ade` / `fde`（masked）
+
+### C. 预测可视化（离线）
+
+```powershell
+python viz_path_planner_predictions.py --labels dataset\run_xxx\labels.jsonl --checkpoint checkpoints_transformer\best.pt --out viz_predictions_9.png
+```
+
+说明：
+
+- GT（绿色）与预测（红色）都在**车辆坐标系**下绘制
+- 默认标注 `6m` 前瞻点（`s=1..15m`，因此 `6m -> index=5`）
+
+### D. 闭环测试（在线）
+
+入口：`test_nn_path_planner_control.py`
+
+Pipeline：
+
+`RGB image -> TransformerPlannerNet -> 15 个局部点 -> 取 index=5 的 6m 点 -> AdaptiveController -> (throttle, brake, steer) -> CarlaEnv.step()`
+
+运行：
+
+```powershell
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\best.pt --device cuda
+```
+
+常用参数：
+
+- `--lookahead_index 5`：默认 6m 点
+- `--flip_pred_y`：调试左右符号（只用于排查坐标系约定问题）
+- `--spectator_follow`：跟车视角
+
+### E. PPO 微调（可选）
+
+入口：`train_path_planner_rl_ppo.py`
+
+项目约束（脚本内已固化）：
+
+- Actor 必须是 **现有 TransformerPlannerNet**（从监督学习 checkpoint 初始化，输入/输出不变）
+- Critic 是**独立的小网络**（不共享 actor 权重）
+- 观测预处理必须与闭环脚本一致（Imagenet normalize）
+
+训练：
+
+```powershell
+python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer\best.pt --total_timesteps 200000 --device cuda
+```
+
+断点续训：
+
+```powershell
+python train_path_planner_rl_ppo.py --resume_zip checkpoints_transformer\ppo_rl_last.zip --total_timesteps 200000 --device cuda
+```
+
+输出（不会覆盖监督学习权重）：
+
+- `checkpoints_transformer/best_rl.pt`
+- `checkpoints_transformer/last_rl.pt`
+- `checkpoints_transformer/ppo_rl_last.zip`（SB3 训练状态）
+
+微调后闭环测试：
+
+```powershell
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\best_rl.pt --device cuda
+```
+
+---
+
+## CarlaEnv / 控制器速览
+
+### 环境 API
 
 ```python
 from carla_env import CarlaEnv
+
+env = CarlaEnv(town="Town03", spawn_point_index=0, destination_index=1, goal_radius=3.0)
+obs = env.reset()
+obs, reward, done, info = env.step([0.3, 0.0, 0.0])
+env.close()
+```
+
+观测 `obs`（7维）：
+
+`[vx, vy, yaw, yaw_rate, distance_to_center, heading_error, speed]`
+
+动作 `action`（3维）：
+
+`[throttle ∈ [0,1], brake ∈ [0,1], steer ∈ [-1,1]]`
+
+### 控制器（推荐）
+
+```python
 from pid_controller import AdaptiveController
 
-# 创建环境
-env = CarlaEnv(town='Town03')
-
-# 创建控制器
-controller = AdaptiveController(target_speed=10.0)
-
-# 运行一个episode
-obs = env.reset()
-for step in range(1000):
-    action = controller.get_control(obs)
-    obs, reward, done, info = env.step(action)
-    if done:
-        break
-
-env.close()
+controller = AdaptiveController(target_speed=5.0)
+action = controller.get_control(obs)
 ```
 
-## 核心组件
+---
 
-### 1. CarlaEnv - 环境类
+## 依赖建议
 
-**主要方法:**
+最小训练/可视化依赖（监督学习 + 可视化）：
 
-- `reset()` → obs - 重置环境并返回初始观测
-- `step(action)` → (obs, reward, done, info) - 执行一步
-- `set_reward_fn(fn)` - 设置自定义奖励函数
-- `close()` - 关闭环境
+- `torch`
+- `pillow`
+- `matplotlib`
+- `numpy`
 
-**初始化参数:**
+在当前环境中安装（示例，按需调整为你的 CUDA 版本对应的 PyTorch）：
 
-```python
-env = CarlaEnv(
-    host='localhost',      # 服务器地址
-    port=2000,            # 服务器端口
-    town='Town03',        # 地图名称
-    reward_fn=None,       # 自定义奖励函数
-    render=False          # 是否渲染
-)
+```powershell
+pip install -U numpy pillow matplotlib
+pip install -U torch
 ```
 
-**观测值 (7维):**
+PPO 微调依赖（可选）：
 
-| 索引 | 名称 | 单位 | 范围 | 说明 |
-|-----|------|------|------|------|
-| 0 | vx | m/s | - | 车体X方向速度 |
-| 1 | vy | m/s | - | 车体Y方向速度 |
-| 2 | yaw | rad | [-π, π] | 偏航角 |
-| 3 | yaw_rate | rad/s | - | 偏航角速度 |
-| 4 | distance_to_center | m | ≥0 | 到车道中心距离 |
-| 5 | heading_error | rad | [0, π] | 航向误差 |
-| 6 | speed | m/s | ≥0 | 车速大小 |
+- `stable-baselines3`（以及其依赖）
+- `gym`（SB3 v1.x 使用旧 Gym API；脚本里做了兼容提示）
 
-**动作值 (3维):**
-
-| 索引 | 名称 | 范围 | 说明 |
-|-----|------|------|------|
-| 0 | throttle | [0, 1] | 油门 |
-| 1 | brake | [0, 1] | 制动 |
-| 2 | steer | [-1, 1] | 转向 |
-
-### 2. PID控制器
-
-#### PIDController - 基础PID
-
-```python
-from pid_controller import PIDController
-
-pid = PIDController(
-    kp=1.0,                              # 比例增益
-    ki=0.1,                              # 积分增益
-    kd=0.3,                              # 微分增益
-    dt=0.05,                             # 时间步长
-    output_range=(-1.0, 1.0)             # 输出范围
-)
-
-output = pid.update(error=0.5)
-pid.reset()
+```powershell
+pip install -U stable-baselines3 gym
 ```
 
-#### LaneKeepingController - 车道保持
+CARLA 依赖：
 
-```python
-from pid_controller import LaneKeepingController
+- `carla` PythonAPI（egg/wheel 与 Python 版本匹配）
 
-controller = LaneKeepingController(dt=0.05)
+---
 
-steering = controller.get_control(
-    distance_to_center=0.5,              # 到车道中心距离
-    heading_error=0.1                    # 航向误差
-)
-```
+## 文档导航
 
-#### SpeedController - 速度控制
+- 3 分钟跑通：`START_HERE.md`
+- 快速查表：`QUICK_REFERENCE.md`
+- 训练脚本说明：`TRAIN_PATH_PLANNER.md`
+- 项目索引：`INDEX.md`
 
-```python
-from pid_controller import SpeedController
+---
 
-controller = SpeedController(target_speed=10.0, dt=0.05)
+## 常见问题（高频）
 
-throttle, brake = controller.get_control(current_speed=8.5)
-controller.set_target_speed(12.0)        # 改变目标速度
-```
+### 1) Windows 导入 carla 失败
 
-#### AdaptiveController - 综合控制
+通常是 **Python 版本与 CARLA egg 不匹配** 或缺少运行库/DLL。请使用与 CARLA PythonAPI 对应的 Python 版本，并确保 Python 能找到 carla egg/wheel。
 
-```python
-from pid_controller import AdaptiveController
+### 2) 闭环抖动 / 车辆走偏
 
-controller = AdaptiveController(target_speed=10.0)
+- 检查 `lookahead_index`（默认 `5` 对应 6m）
+- 用 `--flip_pred_y` 快速排查左右符号约定
+- 确保相机预处理与训练一致（本项目已统一为 Imagenet normalize）
 
-action = controller.get_control(obs)      # 返回 [throttle, brake, steer]
-controller.set_target_speed(12.0)
-controller.reset()
-```
+### 3) CARLA 很慢
 
-### 3. 自定义奖励函数
+优先用 `-RenderOffScreen` 启动 CARLA，并尽量避免打开额外渲染/调试绘制。
 
-```python
-def my_reward_fn(env):
-    """
-    自定义奖励函数
-    
-    参数:
-        env: CarlaEnv 实例
-    
-    返回:
-        reward: 浮点数
-    """
-    obs = env._get_observation()
-    
-    distance_to_center = obs[4]
-    heading_error = obs[5]
-    speed = obs[6]
-    
-    # 定义奖励逻辑
-    lane_reward = np.exp(-distance_to_center * 10) * 1.0
-    heading_reward = np.cos(heading_error) * 0.5
-    speed_reward = 1.0 if 8 <= speed <= 12 else -0.5
-    
-    total_reward = lane_reward + heading_reward + speed_reward
-    
-    return total_reward
-
-# 使用自定义奖励函数
-env = CarlaEnv(town='Town03', reward_fn=my_reward_fn)
-```
-
-## 使用示例
-
-### 示例1: PID控制演示
-
-```python
-from carla_env import CarlaEnv
-from pid_controller import AdaptiveController
-
-env = CarlaEnv(town='Town03')
-controller = AdaptiveController(target_speed=10.0)
-
-obs = env.reset()
-for step in range(1000):
-    action = controller.get_control(obs)
-    obs, reward, done, info = env.step(action)
-    print(f"Step {step}: Reward={reward:.3f}")
-    if done:
-        break
-
-env.close()
-```
-
-### 示例2: 强化学习集成
-
-```python
-from carla_env import CarlaEnv
-import numpy as np
-
-def rl_reward_fn(env):
-    obs = env._get_observation()
-    # 你的RL特定奖励
-    return np.random.random()
-
-env = CarlaEnv(town='Town03', reward_fn=rl_reward_fn)
-
-# 连接你的RL算法
-# agent = DQNAgent(env)
-# agent.train(episodes=1000)
-
-env.close()
-```
-
-### 示例3: 变速控制
-
-```python
-from carla_env import CarlaEnv
-from pid_controller import AdaptiveController
-
-env = CarlaEnv(town='Town03')
-controller = AdaptiveController(target_speed=8.0)
-
-obs = env.reset()
-for step in range(1000):
-    if step == 250:
-        controller.set_target_speed(12.0)
-    elif step == 500:
-        controller.set_target_speed(6.0)
-    
-    action = controller.get_control(obs)
-    obs, reward, done, info = env.step(action)
-    if done:
-        obs = env.reset()
-
-env.close()
-```
-
-## 与RL框架集成
-
-### 与 Stable-Baselines3 集成
-
-```python
-from stable_baselines3 import PPO
-from carla_env import CarlaEnv
-
-env = CarlaEnv(town='Town03')
-
-model = PPO('MlpPolicy', env, verbose=1)
-model.learn(total_timesteps=100000)
-
-obs = env.reset()
-for _ in range(1000):
-    action, _ = model.predict(obs)
-    obs, reward, done, info = env.step(action)
-    if done:
-        obs = env.reset()
-
-env.close()
-```
-
-### 与 PyTorch 集成
-
-```python
-import torch
-from carla_env import CarlaEnv
-
-env = CarlaEnv(town='Town03')
-
-# 你的神经网络模型
-model = YourPolicyNetwork()
-
-obs = env.reset()
-for step in range(10000):
-    obs_tensor = torch.FloatTensor(obs).unsqueeze(0)
-    with torch.no_grad():
-        action = model(obs_tensor).squeeze().numpy()
-    obs, reward, done, info = env.step(action)
-    if done:
-        obs = env.reset()
-
-env.close()
-```
-
-## 可用的地图
-
-- Town01 - 简单城镇
-- Town02 - 多车道城镇
-- Town03 - 有小岛的城镇
-- Town04 - 高速公路
-- Town05 - 城市环岛
-- Town06 - 长直道
-- Town07 - 城市十字路口
-- Town10HD - 城市高清版
-- Town12 - 大城市
-- Town13 - 城市环绕道
-
-## 性能优化建议
-
-1. **使用无UI模式运行CARLA** - 提高约50%速度
-   ```bash
-   ./CarlaUE4.sh -RenderOffScreen
-   ```
-
-2. **减少传感器数量** - 目前实现不使用传感器（基于变换），已经很快
-
-3. **使用批处理** - 并行运行多个环境实例
-
-4. **调整时间步** - 在 `AdaptiveController` 中调整 `dt` 参数
-
-## 常见问题
-
-**Q: 如何自定义观测空间？**
-A: 修改 `CarlaEnv._get_observation()` 方法，添加或移除观测维度。
-
-**Q: 如何添加更多的动作维度？**
-A: 修改 `CarlaEnv.step()` 中的动作处理部分。
-
-**Q: 如何实现其他控制算法？**
-A: 继承 `PIDController` 或直接创建新的控制器类。
-
-**Q: 怎样记录运行数据？**
-A: 在 `step()` 方法后记录 `obs` 和 `info`，或在 `reward_fn` 中添加日志。
-
-## 扩展功能
-
-### 添加传感器数据
-
-```python
-def add_camera_sensor(self):
-    # 添加摄像头
-    camera_bp = self.blueprint_lib.find('sensor.camera.rgb')
-    camera = self.world.spawn_actor(camera_bp, carla.Transform(...))
-    camera.listen(lambda image: self.process_image(image))
-    self.sensors['camera'] = camera
-
-def add_lidar_sensor(self):
-    # 添加激光雷达
-    lidar_bp = self.blueprint_lib.find('sensor.lidar.ray_cast')
-    lidar = self.world.spawn_actor(lidar_bp, carla.Transform(...))
-    lidar.listen(lambda data: self.process_lidar(data))
-    self.sensors['lidar'] = lidar
-```
-
-### 添加碰撞检测
-
-```python
-def add_collision_sensor(self):
-    collision_bp = self.blueprint_lib.find('sensor.other.collision')
-    collision = self.world.spawn_actor(collision_bp, carla.Transform())
-    collision.listen(lambda event: self.on_collision(event))
-    self.sensors['collision'] = collision
-    self.collision_flag = False
-
-def on_collision(self, event):
-    self.collision_flag = True
-```
-
-## 参考资源
-
-- [CARLA官方文档](https://carla.readthedocs.io/)
-- [OpenAI Gym文档](https://gym.openai.com/)
-- [Stable-Baselines3文档](https://stable-baselines3.readthedocs.io/)
-
-## 许可证
-
-MIT License
-
-## 作者
-
-Created for autonomous driving research and RL training.

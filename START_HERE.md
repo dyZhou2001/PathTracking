@@ -30,7 +30,7 @@ INFO:__main__:Step 50: Speed=2.31m/s, Distance=0.38m, Heading=0.02rad, Reward=0.
 ...
 ```
 
-✨ **恭喜！你已经成功运行了强化学习环境！**
+✨ **恭喜！你已经成功跑通 CARLA 环境与数据采集入口！**
 
 ---
 
@@ -57,7 +57,41 @@ env = CarlaEnv(town='Town05')  # 改为Town05
 查看 [USAGE_GUIDE.py](USAGE_GUIDE.py) 中的"自定义奖励函数"，试试写自己的奖励函数
 
 ### 第5步: 深度集成 (后续)
-查看 [README.md](README.md) 学习如何与深度学习框架集成
+查看 [README.md](README.md) 的端到端流程：数据采集 → 监督训练 → 可视化 → 闭环测试 → PPO 微调
+
+---
+
+## 🧠 新增主线：图像 → 局部路径（神经路径规划）
+
+当你已经能运行 `python example.py` 并且 `dataset/run_xxx/labels.jsonl` 正常生成后，可以按这个顺序继续：
+
+### 1) 监督训练（Baseline / Transformer）
+
+```bash
+python train_path_planner_baseline.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
+python train_path_planner_transformer.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
+```
+
+提示：`train_path_planner_transformer.py` 默认 `--device cuda`，没有 GPU 时加 `--device cpu`。
+
+### 2) 离线可视化（9宫格）
+
+```bash
+python viz_path_planner_predictions.py --labels dataset\\run_xxx\\labels.jsonl --checkpoint checkpoints_transformer\\best.pt --out viz_predictions_9.png
+```
+
+### 3) 在线闭环测试（网络输出喂给控制器）
+
+```bash
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best.pt --device cuda
+```
+
+### 4) 可选：PPO 微调
+
+```bash
+python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer\\best.pt --total_timesteps 200000 --device cuda
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best_rl.pt --device cuda
+```
 
 ---
 
@@ -243,7 +277,8 @@ A: 推荐 Python 3.7+
 ```
 ┌─────────────────────────────────────┐
 │ 1. 启动CARLA服务器                   │
-│    ./CarlaUE4.sh -RenderOffScreen   │
+│    Windows: ./CarlaUE4.exe -RenderOffScreen │
+│    Linux:   ./CarlaUE4.sh  -RenderOffScreen │
 └─────────────────────────────────────┘
               ↓
 ┌─────────────────────────────────────┐
@@ -297,9 +332,9 @@ A: 推荐 Python 3.7+
    - ✓ 多地图测试
 
 4. **本月** (10-20小时)
-   - ✓ 与RL框架集成
-   - ✓ 训练第一个模型
-   - ✓ 性能优化
+   - ✓ 训练 Transformer（`train_path_planner_transformer.py`）
+   - ✓ 跑通闭环（`test_nn_path_planner_control.py`）
+   - ✓ 可选：PPO 微调（`train_path_planner_rl_ppo.py`）
 
 ---
 
@@ -339,7 +374,7 @@ A: 推荐 Python 3.7+
 
 **🎉 祝贺！现在就开始吧！** 🚀
 
-*版本 1.0 | 完全就绪 | 祝使用愉快*
+*2026年2月更新 | 已包含神经路径规划全流程 | 祝使用愉快*
 
 ---
 

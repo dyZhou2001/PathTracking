@@ -1,12 +1,20 @@
 # ✨ 项目完成总结
 
-## 🎉 恭喜！你已经获得了完整的Carla强化学习环境框架
+## 🎉 恭喜！你已经获得了完整的 CARLA PathTracking 项目
 
 我为你创建了一个**生产级别的**Carla模拟环境，具有以下特性：
 
 ---
 
 ## 📦 你获得了什么
+
+### ⭐ 新增主线：神经路径规划（图像 → 局部路径）
+
+- ✅ 数据采集：`example.py` 生成 `dataset/run_xxx/labels.jsonl` + `images/`
+- ✅ 监督训练：`train_path_planner_baseline.py` / `train_path_planner_transformer.py`
+- ✅ 离线可视化：`viz_path_planner_predictions.py`
+- ✅ 闭环测试：`test_nn_path_planner_control.py`
+- ✅ PPO 微调（可选）：`train_path_planner_rl_ppo.py` + `rl_carla_path_env.py` + `rl_transformer_policy.py`
 
 ### 1️⃣ **完整的Gym风格环境封装** (`carla_env.py`)
 - ✅ 标准的 `reset()` 和 `step()` 接口
@@ -44,7 +52,8 @@
 
 ### 步骤1: 启动CARLA
 ```bash
-./CarlaUE4.sh -RenderOffScreen
+Windows: ./CarlaUE4.exe -RenderOffScreen
+Linux:   ./CarlaUE4.sh  -RenderOffScreen
 ```
 
 ### 步骤2: 运行最简单的示例
@@ -132,9 +141,16 @@ throttle, brake = speed_controller.get_control(obs[6])
 3. 运行 `advanced_example.py`
 
 ### 高级 (1-2周)
-1. 与RL框架集成（Stable-Baselines3、PyTorch等）
-2. 实现课程学习
+1. 跑通闭环：`test_nn_path_planner_control.py`
+2. 可选：PPO 微调：`train_path_planner_rl_ppo.py`
 3. 多地图测试和泛化
+
+（如果你走“神经路径规划”主线）
+
+1. 采集数据：运行 `python example.py`
+2. 监督训练：运行 `train_path_planner_transformer.py`
+3. 闭环测试：运行 `test_nn_path_planner_control.py`
+4. 可选：PPO 微调：运行 `train_path_planner_rl_ppo.py`
 
 ---
 
@@ -195,15 +211,13 @@ else:
 controller.set_target_speed(15.0)
 ```
 
-### 3. 与RL框架集成
-```python
-# Stable-Baselines3
-from stable_baselines3 import PPO
-model = PPO('MlpPolicy', env)
-model.learn(total_timesteps=100000)
+### 3. PPO 微调（可选）
 
-# 或使用PyTorch/TensorFlow
-# 可直接获取obs和action进行训练
+本项目的 PPO 微调采用“Actor=预训练 Transformer，Critic=独立 CNN”的方式（见 `train_path_planner_rl_ppo.py`）。
+
+```bash
+python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer\\best.pt --total_timesteps 200000 --device cuda
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best_rl.pt --device cuda
 ```
 
 ---
@@ -284,9 +298,9 @@ env.close()
 3. 💡 集成深度学习模型
 
 ### 深入研究
-1. 🚀 与RL框架集成
-2. 🚀 实现高级算法
-3. 🚀 发表研究结果
+1. 🚀 跑通闭环：`test_nn_path_planner_control.py`
+2. 🚀 可选：PPO 微调：`train_path_planner_rl_ppo.py`
+3. 🚀 多地图测试与泛化评估
 
 ---
 
@@ -359,6 +373,17 @@ PathTracking/
 ├── carla_env.py              # 主环境类 (350+ 行)
 ├── pid_controller.py         # PID控制器 (400+ 行)
 ├── example.py               # 基础示例 (300+ 行)
+├── train_path_planner_baseline.py    # 监督训练（baseline）
+├── train_path_planner_transformer.py # 监督训练（transformer）
+├── viz_path_planner_predictions.py   # 预测可视化
+├── test_nn_path_planner_control.py   # 闭环测试
+├── train_path_planner_rl_ppo.py      # PPO 微调（可选）
+├── rl_carla_path_env.py              # PPO 环境
+├── rl_transformer_policy.py          # PPO 策略
+├── nn_path_planner/                  # 网络/数据集/损失/指标
+├── dataset/                          # 数据集输出
+├── checkpoints_transformer/          # Transformer 权重（SL/RL）
+├── checkpoints_baseline/             # Baseline 权重
 ├── advanced_example.py      # 高级示例 (500+ 行)
 ├── config.py                # 参数配置 (400+ 行)
 ├── USAGE_GUIDE.py           # 使用指南 (300+ 行)
@@ -375,6 +400,6 @@ PathTracking/
 
 **🎉 祝你使用愉快！**
 
-*最后更新: 2026年1月*
+*最后更新: 2026年2月*
 *版本: 1.0 (稳定版)*
 *状态: 生产就绪* ✨

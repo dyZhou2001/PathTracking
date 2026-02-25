@@ -289,31 +289,27 @@ print(f"Velocity: {info['velocity']}")
 
 ---
 
-## 🚀 与RL框架集成
+## 🧠 神经路径规划（推荐入口）
 
-### Stable-Baselines3
-```python
-from stable_baselines3 import PPO
-from carla_env import CarlaEnv
+端到端流程（采集 → 训练 → 可视化 → 闭环）：
 
-env = CarlaEnv()
-model = PPO('MlpPolicy', env)
-model.learn(total_timesteps=10000)
+```bash
+# 1) 监督训练（Baseline / Transformer）
+python train_path_planner_baseline.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
+python train_path_planner_transformer.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
+
+# 2) 可视化（离线 9 宫格）
+python viz_path_planner_predictions.py --labels dataset\\run_xxx\\labels.jsonl --checkpoint checkpoints_transformer\\best.pt --out viz_predictions_9.png
+
+# 3) 闭环测试（在线）
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best.pt --device cuda
 ```
 
-### PyTorch
-```python
-import torch
+PPO 微调（可选，Actor=预训练 Transformer，Critic=独立 CNN）：
 
-obs_tensor = torch.FloatTensor(obs).unsqueeze(0)
-action = policy_network(obs_tensor)
-```
-
-### NumPy (简单算法)
-```python
-# 线性策略
-action = np.dot(obs, weights)
-action = np.clip(action, [-1, 0, -1], [1, 1, 1])
+```bash
+python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer\\best.pt --total_timesteps 200000 --device cuda
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best_rl.pt --device cuda
 ```
 
 ---
@@ -322,7 +318,7 @@ action = np.clip(action, [-1, 0, -1], [1, 1, 1])
 
 | 错误 | 原因 | 解决 |
 |------|------|------|
-| 连接超时 | Carla未启动 | `./CarlaUE4.sh` |
+| 连接超时 | Carla未启动 | Windows: `./CarlaUE4.exe` / Linux: `./CarlaUE4.sh` |
 | NaN奖励 | 观测值无效 | 检查 `reward_fn` |
 | 车辆不动 | 油门过小 | 增加 `throttle` |
 | 车辆振荡 | Kp过大 | 降低PID Kp |
@@ -367,4 +363,4 @@ action = np.clip(action, [-1, 0, -1], [1, 1, 1])
 
 ---
 
-**快速参考卡 v1.0** | 最后更新: 2026年1月
+**快速参考卡（含神经路径规划）** | 最后更新: 2026年2月

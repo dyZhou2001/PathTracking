@@ -1,12 +1,11 @@
-# Carla Gym风格环境框架 - 项目总结
+# CARLA PathTracking - 项目总结（经典控制 + 神经路径规划）
 
 ## 📋 项目概览
 
-这是一个完整的Carla自动驾驶模拟环境框架，提供：
-- **Gym兼容的API** - 标准的 `reset()` 和 `step()` 接口
-- **灵活的奖励系统** - 支持自定义奖励函数
-- **PID控制器** - 开箱即用的车道保持和速度控制
-- **RL集成支持** - 轻松与任何深度学习框架集成
+这是一个完整的 CARLA 路径跟踪项目，包含两条主线：
+
+- **经典控制 / Gym 风格 API**：`carla_env.py` 提供 `reset()` / `step()`，可自定义奖励、规划路线、调试绘制；`pid_controller.py` 提供 Pure Pursuit + 速度 PID。
+- **神经路径规划（图像 → 局部路径）**：采集 `labels.jsonl` + 图像，监督训练 Baseline/Transformer，闭环控制测试，且支持用 PPO 在 CARLA 中微调 Transformer actor。
 
 ## 📁 文件结构
 
@@ -26,7 +25,8 @@ PathTracking/
 
 ### 1. 启动Carla服务器
 ```bash
-./CarlaUE4.sh -RenderOffScreen
+Windows: ./CarlaUE4.exe -RenderOffScreen
+Linux:   ./CarlaUE4.sh  -RenderOffScreen
 ```
 
 ### 2. 运行基础示例
@@ -140,14 +140,24 @@ config = get_env_config('medium')
 
 ## 🔧 与深度学习框架集成
 
-### 与 Stable-Baselines3 集成
-```python
-from stable_baselines3 import PPO
-from carla_env import CarlaEnv
+### 监督训练（图像→局部路径）
 
-env = CarlaEnv(town='Town03')
-model = PPO('MlpPolicy', env, verbose=1)
-model.learn(total_timesteps=100000)
+```bash
+python train_path_planner_baseline.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
+python train_path_planner_transformer.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
+```
+
+### 闭环测试（网络输出喂给控制器）
+
+```bash
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best.pt --device cuda
+```
+
+### PPO 微调（可选）
+
+```bash
+python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer\\best.pt --total_timesteps 200000 --device cuda
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best_rl.pt --device cuda
 ```
 
 ### 与 PyTorch 集成

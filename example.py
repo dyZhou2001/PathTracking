@@ -1,10 +1,22 @@
+"""example.py
+
+示例脚本：
+- PID 控制演示（原有）
+- 键盘转向 + 自动定速 的数据采集（新增）
+
+关于“窗口焦点”：
+- `pynput`：全局键盘监听，通常不依赖焦点（Carla 窗口/终端都行）。
+- `msvcrt`：从终端读取按键，焦点必须在终端窗口。
 """
-示例脚本：展示如何使用Carla环境和PID控制器
-"""
-import numpy as np
-from carla_env import CarlaEnv
-from pid_controller import AdaptiveController
+
 import logging
+import time
+from dataclasses import dataclass
+
+import numpy as np
+
+from carla_env import CarlaEnv
+from pid_controller import AdaptiveController, SpeedController
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +36,9 @@ GOAL_RADIUS = 3.0
 # Carla 可视化调试（在 CarlaUE4 窗口里画线/点）
 DEBUG_DRAW = False
 
+# 同步步长（建议与采集/控制一致）
+FIXED_DELTA_SECONDS = 0.05
+
 # ==============================
 # 数据集采集（图像 + 参考轨迹标签）
 # ==============================
@@ -37,6 +52,23 @@ DATASET_SYNC = True
 CAMERA_WIDTH = 800
 CAMERA_HEIGHT = 600
 CAMERA_FOV = 90.0
+
+# ==============================
+# 键盘控制（用于采集纠偏数据）
+# ==============================
+# 推荐优先使用 pynput（全局监听，不依赖焦点）；没有安装会自动回退到 msvcrt（需要终端焦点）
+KEYBOARD_BACKEND = "pynput"  # "pynput" or "msvcrt"
+
+# 控制手感
+KEY_STEER_RATE = 1.8     # steer/s，按住方向键时的变化速度
+KEY_STEER_RETURN = 2.5   # steer/s，松开后回正速度
+KEY_STEER_DEADBAND = 0.02
+
+# 键盘采集时的目标速度（仍由 SpeedController 自动控制油门/刹车）
+KEY_TARGET_SPEED = 0.5
+
+# 是否将键盘采集模式设为默认入口
+RUN_KEYBOARD_COLLECT = True
 
 
 def custom_reward_fn(env):
@@ -99,6 +131,7 @@ def example_pid_control():
         dataset_future_points=DATASET_FUTURE_POINTS,
         dataset_point_spacing=DATASET_POINT_SPACING,
         synchronous_mode=DATASET_SYNC,
+        fixed_delta_seconds=FIXED_DELTA_SECONDS,
         camera_width=CAMERA_WIDTH,
         camera_height=CAMERA_HEIGHT,
         camera_fov=CAMERA_FOV,
@@ -132,6 +165,265 @@ def example_pid_control():
                 break
         
     finally:
+        env.close()
+
+
+@dataclass
+class _KeyboardState:
+    left: bool = False
+    right: bool = False
+    quit: bool = False
+    brake: bool = False
+
+
+class KeyboardSteering:
+    """键盘转向输入：输出 steer in [-1,1]。
+
+    - 左/右: A/D 或 ←/→
+    - 空格: 直接刹车（覆盖 SpeedController 输出）
+    - Q 或 ESC: 退出循环
+    """
+
+    def __init__(
+        self,
+        *,
+        dt: float,
+        backend: str = "pynput",
+        steer_rate: float = 1.8,
+        return_rate: float = 2.5,
+        deadband: float = 0.02,
+    ):
+        self.dt = float(dt)
+        self.backend = str(backend).lower()
+        self.steer_rate = float(steer_rate)
+        self.return_rate = float(return_rate)
+        self.deadband = float(deadband)
+
+        self.state = _KeyboardState()
+        self.steer = 0.0
+
+        self._listener = None
+        self._msvcrt = None
+
+    def start(self) -> None:
+        if self.backend == "pynput":
+            try:
+                from pynput import keyboard as pynput_keyboard  # type: ignore
+            except Exception as e:
+                logger.warning(
+                    "pynput 不可用，回退到 msvcrt（需要终端窗口焦点）。"
+                    "如需全局监听，请运行: pip install pynput\n"
+                    f"原始错误: {e}"
+                )
+                self.backend = "msvcrt"
+            else:
+                self._start_pynput(pynput_keyboard)
+
+        if self.backend == "msvcrt":
+            try:
+                import msvcrt
+            except Exception as e:
+                raise RuntimeError("msvcrt 不可用（非 Windows 环境？）") from e
+            self._msvcrt = msvcrt
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
+            self._listener = None
+
+    def _start_pynput(self, pynput_keyboard) -> None:
+        Key = pynput_keyboard.Key
+
+        def _is_left(k) -> bool:
+            if k == Key.left:
+                return True
+            try:
+                return getattr(k, "char", None) in ("a", "A")
+            except Exception:
+                return False
+
+        def _is_right(k) -> bool:
+            if k == Key.right:
+                return True
+            try:
+                return getattr(k, "char", None) in ("d", "D")
+            except Exception:
+                return False
+
+        def _is_quit(k) -> bool:
+            if k in (Key.esc,):
+                return True
+            try:
+                return getattr(k, "char", None) in ("q", "Q")
+            except Exception:
+                return False
+
+        def _is_brake(k) -> bool:
+            return k == Key.space
+
+        def on_press(key):
+            if _is_left(key):
+                self.state.left = True
+            if _is_right(key):
+                self.state.right = True
+            if _is_brake(key):
+                self.state.brake = True
+            if _is_quit(key):
+                self.state.quit = True
+
+        def on_release(key):
+            if _is_left(key):
+                self.state.left = False
+            if _is_right(key):
+                self.state.right = False
+            if _is_brake(key):
+                self.state.brake = False
+
+        self._listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
+        self._listener.daemon = True
+        self._listener.start()
+
+    def _poll_msvcrt(self) -> None:
+        """msvcrt：非阻塞读取按键事件（需要终端窗口焦点）。
+
+        说明：msvcrt 没有“按住/松开”的精确信号，我们用“最近一次按键”来更新 state，
+        并在无输入时自动回正。
+        """
+        msvcrt = self._msvcrt
+        if msvcrt is None:
+            return
+
+        self.state.left = False
+        self.state.right = False
+        self.state.brake = False
+
+        while msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            # Arrow keys come as '\x00' or '\xe0' prefix then a code.
+            if ch in ("\x00", "\xe0"):
+                code = msvcrt.getwch()
+                if code == "K":  # left
+                    self.state.left = True
+                elif code == "M":  # right
+                    self.state.right = True
+                continue
+
+            if ch in ("a", "A"):
+                self.state.left = True
+            elif ch in ("d", "D"):
+                self.state.right = True
+            elif ch in ("q", "Q"):
+                self.state.quit = True
+            elif ch == " ":
+                self.state.brake = True
+
+    def update(self) -> float:
+        if self.backend == "msvcrt":
+            self._poll_msvcrt()
+
+        if self.state.left and not self.state.right:
+            self.steer -= self.steer_rate * self.dt
+        elif self.state.right and not self.state.left:
+            self.steer += self.steer_rate * self.dt
+        else:
+            # 回正
+            if abs(self.steer) <= self.deadband:
+                self.steer = 0.0
+            else:
+                step = self.return_rate * self.dt
+                self.steer -= np.sign(self.steer) * min(abs(self.steer), step)
+
+        self.steer = float(np.clip(self.steer, -1.0, 1.0))
+        return self.steer
+
+
+def example_keyboard_collect():
+    """示例: 键盘转向采集数据。
+
+    推荐设置：
+    - COLLECT_DATASET = True
+    - DATASET_SYNC = True
+    """
+    logger.info("=" * 50)
+    logger.info("示例: 键盘转向 + 自动定速 采集数据")
+    logger.info("控制: A/D 或 ←/→ 转向；空格刹车；Q/ESC 退出")
+    logger.info("=" * 50)
+
+    env = CarlaEnv(
+        town="Town03",
+        spectator_follow=True,
+        max_episode_steps=100000,
+        spawn_point_index=SPAWN_POINT_INDEX,
+        destination_index=DESTINATION_INDEX,
+        goal_radius=GOAL_RADIUS,
+        debug_draw=DEBUG_DRAW,
+        debug_draw_trail_persist=DEBUG_DRAW,
+
+        # dataset
+        collect_dataset=COLLECT_DATASET,
+        dataset_dir=DATASET_DIR,
+        dataset_run_name=DATASET_RUN_NAME,
+        dataset_save_every=DATASET_SAVE_EVERY,
+        dataset_future_points=DATASET_FUTURE_POINTS,
+        dataset_point_spacing=DATASET_POINT_SPACING,
+        synchronous_mode=DATASET_SYNC,
+        fixed_delta_seconds=FIXED_DELTA_SECONDS,
+        camera_width=CAMERA_WIDTH,
+        camera_height=CAMERA_HEIGHT,
+        camera_fov=CAMERA_FOV,
+    )
+
+    speed_ctl = SpeedController(target_speed=float(KEY_TARGET_SPEED), dt=float(FIXED_DELTA_SECONDS))
+    kb = KeyboardSteering(
+        dt=float(FIXED_DELTA_SECONDS),
+        backend=str(KEYBOARD_BACKEND),
+        steer_rate=float(KEY_STEER_RATE),
+        return_rate=float(KEY_STEER_RETURN),
+        deadband=float(KEY_STEER_DEADBAND),
+    )
+
+    try:
+        obs = env.reset()
+        kb.start()
+
+        for step in range(100000):
+            steer = kb.update()
+
+            speed = float(obs[6]) if len(obs) >= 7 else 0.0
+            throttle, brake = speed_ctl.get_control(speed)
+
+            if kb.state.brake:
+                throttle, brake = 0.0, 1.0
+
+            action = np.array([throttle, brake, steer], dtype=np.float32)
+            obs, reward, done, info = env.step(action)
+
+            if kb.state.quit:
+                logger.info("退出键触发，停止采集")
+                break
+
+            if step % 50 == 0:
+                dist_goal = info.get("distance_to_goal", None)
+                dist_goal_str = f"{dist_goal:.2f}m" if isinstance(dist_goal, (int, float)) else "N/A"
+                lateral = float(obs[4]) if len(obs) >= 5 else 0.0
+                heading = float(obs[5]) if len(obs) >= 6 else 0.0
+                logger.info(
+                    f"Step {step}: Speed={speed:.2f}m/s steer={steer:+.2f} "
+                    f"lat={lateral:+.2f} head={heading:+.2f} Dist2Goal={dist_goal_str}"
+                )
+
+            if done:
+                logger.info("Episode完成")
+                break
+
+            # 给异步输入一点时间片；同步仿真下通常不需要，但能降低 CPU 占用
+            time.sleep(0.0)
+
+    finally:
+        kb.stop()
         env.close()
 
 
@@ -240,7 +532,10 @@ if __name__ == "__main__":
     
     # test_pid_controller()  # 取消注释运行PID测试
     
-    example_pid_control()  # 运行PID控制演示
+    if RUN_KEYBOARD_COLLECT:
+        example_keyboard_collect()
+    else:
+        example_pid_control()  # 运行PID控制演示
     
     # example_rl_training()  # 取消注释运行RL训练框架
     

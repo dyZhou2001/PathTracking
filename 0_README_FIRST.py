@@ -1,13 +1,16 @@
-"""
-=============================================================================
-🎉 CARLA强化学习环境框架 - 项目完成总结
-=============================================================================
+"""0_README_FIRST.py
 
-项目名称: CARLA Gym风格环境框架
-完成日期: 2026年1月18日
-项目状态: ✅ 完全完成 | 生产就绪
-总行数: 5300+行代码和文档
-=============================================================================
+本文件是“从仓库入口快速理解项目”的可执行导览脚本。
+
+当前仓库已从 v1.0（Gym 环境 + PID 控制器）扩展为 v2.x：
+
+- 数据采集：`example.py` 生成 `dataset/run_xxx/labels.jsonl` + `images/`
+- 监督学习：`train_path_planner_baseline.py` / `train_path_planner_transformer.py`
+- 可视化：`viz_path_planner_predictions.py`
+- 闭环测试：`test_nn_path_planner_control.py`
+- PPO 微调（可选）：`train_path_planner_rl_ppo.py`（Actor=预训练 Transformer，Critic=独立 CNN）
+
+最后更新：2026-02-23
 """
 
 # ============================================================================
@@ -15,26 +18,34 @@
 # ============================================================================
 
 PROJECT_DELIVERABLES = {
-    '核心代码': {
-        'carla_env.py': '350+行 | 完整的Gym风格环境封装',
-        'pid_controller.py': '400+行 | 四层PID控制器架构',
-        'config.py': '400+行 | 参数预设和配置系统',
-        'example.py': '300+行 | 4个基础示例',
-        'advanced_example.py': '500+行 | 6个高级示例',
+    "核心代码（控制/环境）": {
+        "carla_env.py": "Gym 风格 CARLA 环境（支持采集/相机/碰撞/压线）",
+        "pid_controller.py": "Pure Pursuit + 速度 PID 等控制器",
+        "config.py": "参数预设与配置系统",
     },
-    
-    '文档': {
-        'README.md': '600+行 | 完整API文档',
-        'QUICK_REFERENCE.md': '300+行 | 快速参考卡',
-        'START_HERE.md': '300+行 | 启动指南',
-        'USAGE_GUIDE.py': '300+行 | 详细代码示例',
-        'PROJECT_SUMMARY.md': '200+行 | 项目总结',
-        'COMPLETE_GUIDE.py': '300+行 | 完整指南',
-        'INDEX.md': '300+行 | 文件索引',
-        'PROJECT_DELIVERY_REPORT.md': '250+行 | 交付报告',
+    "数据采集与闭环": {
+        "example.py": "数据采集入口（键盘转向/自动定速）",
+        "test_nn_path_planner_control.py": "闭环测试：图像→Transformer→控制器→CARLA",
     },
-    
-    '总计': '15个文件 | 5300+行代码和文档',
+    "监督学习（图像→局部路径）": {
+        "train_path_planner_baseline.py": "CNN baseline 监督训练",
+        "train_path_planner_transformer.py": "Transformer 监督训练（可选 use_state）",
+        "viz_path_planner_predictions.py": "离线预测可视化（9 宫格）",
+        "nn_path_planner/": "数据集/几何/模型/损失/指标",
+    },
+    "强化学习微调（可选）": {
+        "train_path_planner_rl_ppo.py": "PPO 微调入口（Actor=预训练 Transformer）",
+        "rl_carla_path_env.py": "PPO 训练用 Gym 环境",
+        "rl_transformer_policy.py": "SB3 自定义 actor/critic policy",
+    },
+    "文档": {
+        "README.md": "端到端流程与说明（以此为准）",
+        "START_HERE.md": "3 分钟启动指南",
+        "QUICK_REFERENCE.md": "命令/参数速查",
+        "TRAIN_PATH_PLANNER.md": "训练脚本文档",
+        "INDEX.md": "文件导航",
+        "PROJECT_SUMMARY.md": "项目总结",
+    },
 }
 
 # ============================================================================
@@ -42,21 +53,13 @@ PROJECT_DELIVERABLES = {
 # ============================================================================
 
 FEATURES_IMPLEMENTED = """
-✅ Gym风格API (reset/step)
-✅ 7维观测空间设计
-✅ 3维动作空间支持
-✅ 自定义奖励函数系统
-✅ PIDController基础实现
-✅ LaneKeepingController车道保持
-✅ SpeedController速度控制
-✅ AdaptiveController综合控制
-✅ 动态参数调整
-✅ 多地图支持(10+个)
-✅ 参数预设系统(4种配置)
-✅ 完整的错误处理
-✅ 详细的日志记录
-✅ 完善的文档说明
-✅ 充分的代码示例
+✅ Gym 风格 API（reset/step）与路线/调试绘制
+✅ Pure Pursuit + Speed PID 控制器（AdaptiveController）
+✅ 相机采集 + 轨迹标签落盘（dataset/run_xxx/labels.jsonl + images/）
+✅ 监督学习：baseline/transformer（输出 15 个未来点 + remaining_length_m）
+✅ 离线可视化：预测 vs GT（车辆坐标系）
+✅ 闭环测试：网络输出 → 控制器 → CARLA
+✅ PPO 微调（可选）：Actor=预训练 Transformer，Critic=独立网络
 """
 
 # ============================================================================
@@ -99,16 +102,21 @@ KEY_HIGHLIGHTS = """
 # ============================================================================
 
 QUICK_START = """
-步骤1: 启动CARLA
-    ./CarlaUE4.sh -RenderOffScreen
+步骤1：启动 CARLA Server
+    Windows:
+        ./CarlaUE4.exe -RenderOffScreen
+    Linux:
+        ./CarlaUE4.sh -RenderOffScreen
 
-步骤2: 运行示例
+步骤2：运行采集/控制入口
     python example.py
 
-步骤3: 查看结果
-    观察控制台输出
+步骤3：训练 Transformer（需要先有 dataset/run_xxx/labels.jsonl）
+    python train_path_planner_transformer.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
+    （无 GPU 时加：--device cpu）
 
-耗时: 5分钟
+步骤4：闭环测试
+    python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best.pt --device cuda
 """
 
 # ============================================================================
@@ -178,12 +186,21 @@ controller.lane_controller.steering_controller.set_gains(kp=2.5)
 controller.reset()
 """,
     
-    'RL集成': """
-from stable_baselines3 import PPO
+    "训练与闭环（最常用）": """
+# 1) 监督训练（Transformer）
+python train_path_planner_transformer.py --labels dataset\\run_xxx\\labels.jsonl --epochs 20
 
-env = CarlaEnv()
-model = PPO('MlpPolicy', env)
-model.learn(total_timesteps=50000)
+# 2) 离线可视化
+python viz_path_planner_predictions.py --labels dataset\\run_xxx\\labels.jsonl --checkpoint checkpoints_transformer\\best.pt --out viz_predictions_9.png
+
+# 3) 闭环测试
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best.pt --device cuda
+""",
+
+    "PPO 微调（可选）": """
+# Actor=监督学习 Transformer（从 --sl_checkpoint 加载），Critic=独立 CNN
+python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer\\best.pt --total_timesteps 200000 --device cuda
+python test_nn_path_planner_control.py --checkpoint checkpoints_transformer\\best_rl.pt --device cuda
 """,
 }
 
@@ -231,14 +248,14 @@ LEARNING_PROGRESS = {
         '耗时': '5-7小时',
     },
     
-    'Week 3': {
-        '目标': 'RL框架集成',
-        '任务': [
-            '✓ 与RL框架集成',
-            '✓ 训练简单模型',
-            '✓ 性能优化',
+    "Week 3": {
+        "目标": "神经路径规划闭环与（可选）PPO 微调",
+        "任务": [
+            "✓ 训练 Transformer（train_path_planner_transformer.py）",
+            "✓ 闭环测试（test_nn_path_planner_control.py）",
+            "✓ 可选：PPO 微调（train_path_planner_rl_ppo.py）",
         ],
-        '耗时': '8-10小时',
+        "耗时": "8-12小时",
     },
 }
 
@@ -316,7 +333,7 @@ FAQ_QUICK_ANSWERS = {
     'Q: 如何自定义奖励?': 'A: 查看USAGE_GUIDE.py中的"自定义奖励函数"',
     'Q: PID参数怎么调?': 'A: 查看QUICK_REFERENCE.md中的"参数调整"',
     'Q: 支持哪些地图?': 'A: 10+个Town地图，建议从Town03开始',
-    'Q: 可以用GPU吗?': 'A: 建议，可以加快CARLA渲染',
+    'Q: 可以用GPU吗?': 'A: 监督/微调训练建议使用；CARLA 也依赖显卡渲染（推荐 -RenderOffScreen）。',
     'Q: 文档在哪里?': 'A: 查看INDEX.md获取完整文件索引',
 }
 
@@ -325,7 +342,7 @@ FAQ_QUICK_ANSWERS = {
 # ============================================================================
 
 FINAL_WORDS = """
-祝贺你！你现在拥有一个完整的、生产级别的强化学习环境框架。
+祝贺你！你现在拥有一个完整的 CARLA PathTracking 项目。
 
 这个框架包含：
 📦 完整的代码实现
@@ -337,21 +354,22 @@ FINAL_WORDS = """
 现在就准备好开始你的强化学习之旅吧！
 
 推荐流程:
-1. 阅读 START_HERE.md (5分钟)
-2. 运行 python example.py (5分钟)
-3. 查看 QUICK_REFERENCE.md (10分钟)
-4. 修改参数体验效果 (20分钟)
-5. 深入学习高级功能 (持续)
+1. 阅读 START_HERE.md（3分钟）
+2. 运行 python example.py（采集数据）
+3. 训练 Transformer：train_path_planner_transformer.py
+4. 可视化：viz_path_planner_predictions.py
+5. 闭环：test_nn_path_planner_control.py
+6. 可选：PPO 微调：train_path_planner_rl_ppo.py
 
 有任何问题，查看对应的文档文件，都能找到答案。
 
-祝你使用愉快！🌟
+祝你使用愉快！
 """
 
 # ============================================================================
 if __name__ == "__main__":
     print("=" * 80)
-    print("🎉 CARLA强化学习环境框架 - 项目完成总结")
+    print("CARLA PathTracking - 项目导览")
     print("=" * 80)
     
     print("\n📊 交付物:")
@@ -401,5 +419,5 @@ if __name__ == "__main__":
     print("  • 文件索引: INDEX.md")
     print("  • 交付报告: PROJECT_DELIVERY_REPORT.md")
     
-    print("\n版本: 1.0 | 状态: 稳定版本 ✨")
+    print("\n版本: v2.x | 状态: 文档与脚本已对齐当前仓库")
     print("=" * 80)

@@ -284,14 +284,18 @@ class AdaptiveController:
         throttle, brake = self.speed_controller.get_control(speed)
         
         # 当航向误差过大时，减速以保证安全
+        # 注意：若车速已接近 0，再强制最小刹车可能导致“停住后再也起不来”。
+        min_speed_for_forced_brake = 0.5  # m/s
         if abs(heading_error) > np.pi / 6:  # 30度
             throttle *= 0.5
-            brake = max(brake, 0.3)
+            if speed > min_speed_for_forced_brake:
+                brake = max(brake, 0.3)
         
         # 当偏离车道较远时，减速
         if distance_to_center > 1.5:
             throttle *= 0.5
-            brake = max(brake, 0.2)
+            if speed > min_speed_for_forced_brake:
+                brake = max(brake, 0.2)
         
         return np.array([throttle, brake, steering], dtype=np.float32)
     
