@@ -104,7 +104,7 @@ KEY_HIGHLIGHTS = """
 QUICK_START = """
 步骤1：启动 CARLA Server
     Windows:
-        ./CarlaUE4.exe -RenderOffScreen
+        D:/CARLA_0.9.15/WindowsNoEditor/CarlaUE4.exe -RenderOffScreen
     Linux:
         ./CarlaUE4.sh -RenderOffScreen
 

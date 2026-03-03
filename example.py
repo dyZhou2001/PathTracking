@@ -34,7 +34,7 @@ DESTINATION_INDEX = 1
 GOAL_RADIUS = 3.0
 
 # Carla 可视化调试（在 CarlaUE4 窗口里画线/点）
-DEBUG_DRAW = False
+DEBUG_DRAW = True
 
 # 同步步长（建议与采集/控制一致）
 FIXED_DELTA_SECONDS = 0.05
@@ -42,7 +42,7 @@ FIXED_DELTA_SECONDS = 0.05
 # ==============================
 # 数据集采集（图像 + 参考轨迹标签）
 # ==============================
-COLLECT_DATASET = True
+COLLECT_DATASET = False
 DATASET_DIR = "dataset"
 DATASET_RUN_NAME = None  # 例如 "town03_spawn0_to1"；None 则自动生成并在多次 reset 间复用
 DATASET_SAVE_EVERY = 5
@@ -68,7 +68,7 @@ KEY_STEER_DEADBAND = 0.02
 KEY_TARGET_SPEED = 0.5
 
 # 是否将键盘采集模式设为默认入口
-RUN_KEYBOARD_COLLECT = True
+RUN_KEYBOARD_COLLECT = False
 
 
 def custom_reward_fn(env):

@@ -47,8 +47,9 @@ def build_transformer_from_sl_ckpt(ckpt: Dict[str, Any]) -> Tuple[TransformerPla
 
 
 class ImageValueNet(nn.Module):
-    def __init__(self):
+    def __init__(self, state_dim: int = 0):
         super().__init__()
+        self.state_dim = state_dim
         self.net = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),
             nn.ReLU(inplace=True),
@@ -59,16 +60,18 @@ class ImageValueNet(nn.Module):
             nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
         )
         self.head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128, 128),
+            nn.Linear(128 + state_dim, 128),
             nn.ReLU(inplace=True),
             nn.Linear(128, 1),
         )
 
-    def forward(self, obs_img: torch.Tensor) -> torch.Tensor:
+    def forward(self, obs_img: torch.Tensor, state: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.net(obs_img)
+        if self.state_dim > 0 and state is not None:
+            x = torch.cat([x, state], dim=1)
         v = self.head(x)
         return v.view(-1)
 
@@ -117,14 +120,27 @@ class TransformerActorCriticPolicy(ActorCriticPolicy):
         self._sl_args = dict(sl_args)
 
         self.actor: TransformerPlannerNet = actor
-        self.critic: nn.Module = ImageValueNet()
+        
+        # Freeze the core parameters of the Transformer to prevent catastrophic forgetting
+        for param in self.actor.parameters():
+            param.requires_grad = False
+        # Only allow fine-tuning of the final point projection MLP
+        for param in self.actor.points_mlp.parameters():
+            param.requires_grad = True
 
-        # Diagonal Gaussian std
+        use_state = bool(sl_args.get("use_state", False))
+        state_dim = 4 if use_state else 0
+        self.critic: nn.Module = ImageValueNet(state_dim=state_dim)
+
+        # Diagonal Gaussian std: initialized to ~0.2m noise (log_std=-1.6)
+        # Allows for broader exploration during the initial RL phase.
         action_dim = int(np.prod(self.action_space.shape))
-        self.log_std = nn.Parameter(torch.zeros(action_dim, dtype=torch.float32))
+        self.log_std = nn.Parameter(torch.ones(action_dim, dtype=torch.float32) * -0.10)
 
         # Optimizer (SB3 sets optimizer_class/kwargs)
-        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+        # Filter parameters to ensure heavily frozen weights strictly aren't updated (avoids weight_decay issues)
+        trainable_params = [p for p in self.parameters() if p.requires_grad]
+        self.optimizer = self.optimizer_class(trainable_params, lr=lr_schedule(1), **self.optimizer_kwargs)
 
     @staticmethod
     def _split_obs(obs: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -169,8 +185,9 @@ class TransformerActorCriticPolicy(ActorCriticPolicy):
         dist = self._dist(mean_actions)
         actions = mean_actions if deterministic else dist.rsample()
         log_prob = self._log_prob(dist, actions)
-        image, _ = self._split_obs(obs)
-        values = self.critic(image.float())
+        image, state = self._split_obs(obs)
+        state_t = state.float() if state is not None else None
+        values = self.critic(image.float(), state_t)
         return actions, values, log_prob
 
     def _predict(self, observation: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
@@ -185,13 +202,15 @@ class TransformerActorCriticPolicy(ActorCriticPolicy):
         dist = self._dist(mean_actions)
         log_prob = self._log_prob(dist, actions)
         entropy = self._entropy(dist)
-        image, _ = self._split_obs(obs)
-        values = self.critic(image.float())
+        image, state = self._split_obs(obs)
+        state_t = state.float() if state is not None else None
+        values = self.critic(image.float(), state_t)
         return values, log_prob, entropy
 
     def predict_values(self, obs: torch.Tensor) -> torch.Tensor:
-        image, _ = self._split_obs(obs)
-        return self.critic(image.float())
+        image, state = self._split_obs(obs)
+        state_t = state.float() if state is not None else None
+        return self.critic(image.float(), state_t)
 
     def get_sl_args_for_export(self) -> Dict[str, Any]:
         """Args needed to rebuild TransformerPlannerNet for closed-loop test script."""

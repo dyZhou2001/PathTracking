@@ -15,6 +15,7 @@ Outputs:
 
 Run (Windows / PowerShell):
 - Train:
+python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer/best.pt --total_timesteps 200000 --device cuda
     python train_path_planner_rl_ppo.py --sl_checkpoint checkpoints_transformer/best.pt --total_timesteps 200000 --device cuda
 - Resume:
     python train_path_planner_rl_ppo.py --resume_zip checkpoints_transformer/ppo_rl_last.zip --total_timesteps 200000 --device cuda
@@ -33,7 +34,7 @@ import numpy as np
 
 import torch
 
-from rl_carla_path_env import CarlaPathFollowingRLEnv, RewardConfig
+from rl_carla_path_env import CarlaPathFollowingRLEnv, RewardConfig, ViolationConfig
 from rl_transformer_policy import TransformerActorCriticPolicy
 
 
@@ -228,18 +229,44 @@ def main() -> None:
     p.add_argument("--checkpoint_freq_steps", type=int, default=20000)
 
     # Reward weights
-    p.add_argument("--lane_center_w", type=float, default=2.0)
+    p.add_argument("--lane_center_w", type=float, default=1.8)
     p.add_argument("--lane_center_k", type=float, default=3.0)
+    p.add_argument("--lane_edge_penalty_w", type=float, default=1.2)
+    p.add_argument("--lane_edge_soft_ratio", type=float, default=0.45)
     p.add_argument("--heading_w", type=float, default=1.0)
     p.add_argument("--speed_w", type=float, default=0.3)
     p.add_argument("--speed_k", type=float, default=0.8)
-    p.add_argument("--steer_smooth_w", type=float, default=0.2)
+    p.add_argument("--steer_smooth_w", type=float, default=0.4)
+    p.add_argument("--path_smoothness_w", type=float, default=0.2)
+    p.add_argument("--path_smoothness_clip", type=float, default=3.0)
+    p.add_argument("--progress_w", type=float, default=5.0)
+    p.add_argument("--progress_clip", type=float, default=1.5)
     p.add_argument("--lane_change_penalty", type=float, default=-0.2)
+    p.add_argument("--broken_line_cross_penalty", type=float, default=-0.03)
+    p.add_argument("--solid_line_cross_penalty", type=float, default=-0.05)
 
-    p.add_argument("--success_bonus", type=float, default=20.0)
-    p.add_argument("--collision_penalty", type=float, default=-20.0)
-    p.add_argument("--offroad_penalty", type=float, default=-20.0)
-    p.add_argument("--wrong_way_penalty", type=float, default=-20.0)
+    p.add_argument("--success_bonus", type=float, default=180.0)
+    p.add_argument("--collision_penalty", type=float, default=-120.0)
+    p.add_argument("--offroad_penalty", type=float, default=-120.0)
+    p.add_argument("--wrong_way_penalty", type=float, default=-120.0)
+
+    # Inner-shoulder violation detector (two-level: soft penalty + hard termination)
+    p.add_argument("--junction_grace_steps", type=int, default=20)
+    p.add_argument("--violation_soft_score_threshold", type=float, default=1.0)
+    p.add_argument("--violation_hard_score_threshold", type=float, default=2.4)
+    p.add_argument("--violation_soft_depth_threshold", type=float, default=0.25)
+    p.add_argument("--violation_hard_depth_threshold", type=float, default=0.75)
+    p.add_argument("--violation_soft_consecutive_steps", type=int, default=4)
+    p.add_argument("--violation_hard_consecutive_steps", type=int, default=16)
+    p.add_argument("--violation_clear_consecutive_steps", type=int, default=6)
+    p.add_argument("--violation_illegal_area_consecutive_steps", type=int, default=8)
+    p.add_argument("--violation_wrong_way_consecutive_steps", type=int, default=8)
+    p.add_argument("--violation_weight_lane_type", type=float, default=1.0)
+    p.add_argument("--violation_weight_lane_event", type=float, default=0.3)
+    p.add_argument("--violation_weight_inner_depth", type=float, default=1.2)
+    p.add_argument("--violation_soft_penalty_scale", type=float, default=0.35)
+    p.add_argument("--violation_hard_penalty", type=float, default=-120.0)
+    p.add_argument("--violation_turn_sign_min_abs_target_y", type=float, default=0.25)
 
     args = p.parse_args()
 
@@ -253,15 +280,42 @@ def main() -> None:
     reward_cfg = RewardConfig(
         lane_center_w=float(args.lane_center_w),
         lane_center_k=float(args.lane_center_k),
+        lane_edge_penalty_w=float(args.lane_edge_penalty_w),
+        lane_edge_soft_ratio=float(args.lane_edge_soft_ratio),
         heading_w=float(args.heading_w),
         speed_w=float(args.speed_w),
         speed_k=float(args.speed_k),
         steer_smooth_w=float(args.steer_smooth_w),
+        path_smoothness_w=float(args.path_smoothness_w),
+        path_smoothness_clip=float(args.path_smoothness_clip),
+        progress_w=float(args.progress_w),
+        progress_clip=float(args.progress_clip),
         lane_change_penalty=float(args.lane_change_penalty),
+        broken_line_cross_penalty=float(args.broken_line_cross_penalty),
+        solid_line_cross_penalty=float(args.solid_line_cross_penalty),
         success_bonus=float(args.success_bonus),
         collision_penalty=float(args.collision_penalty),
         offroad_penalty=float(args.offroad_penalty),
         wrong_way_penalty=float(args.wrong_way_penalty),
+    )
+
+    violation_cfg = ViolationConfig(
+        junction_grace_steps=int(args.junction_grace_steps),
+        soft_score_threshold=float(args.violation_soft_score_threshold),
+        hard_score_threshold=float(args.violation_hard_score_threshold),
+        soft_depth_threshold=float(args.violation_soft_depth_threshold),
+        hard_depth_threshold=float(args.violation_hard_depth_threshold),
+        soft_consecutive_steps=int(args.violation_soft_consecutive_steps),
+        hard_consecutive_steps=int(args.violation_hard_consecutive_steps),
+        clear_consecutive_steps=int(args.violation_clear_consecutive_steps),
+        illegal_area_consecutive_steps=int(args.violation_illegal_area_consecutive_steps),
+        wrong_way_consecutive_steps=int(args.violation_wrong_way_consecutive_steps),
+        weight_lane_type=float(args.violation_weight_lane_type),
+        weight_lane_event=float(args.violation_weight_lane_event),
+        weight_inner_depth=float(args.violation_weight_inner_depth),
+        soft_penalty_scale=float(args.violation_soft_penalty_scale),
+        hard_penalty=float(args.violation_hard_penalty),
+        turn_sign_min_abs_target_y=float(args.violation_turn_sign_min_abs_target_y),
     )
 
     env = CarlaPathFollowingRLEnv(
@@ -282,6 +336,7 @@ def main() -> None:
         include_state=include_state,
         state_xy_scale=state_xy_scale,
         reward_cfg=reward_cfg,
+        violation_cfg=violation_cfg,
     )
 
     callback = SaveAndEvalCallback(

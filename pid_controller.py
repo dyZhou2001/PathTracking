@@ -286,13 +286,13 @@ class AdaptiveController:
         # 当航向误差过大时，减速以保证安全
         # 注意：若车速已接近 0，再强制最小刹车可能导致“停住后再也起不来”。
         min_speed_for_forced_brake = 0.5  # m/s
-        if abs(heading_error) > np.pi / 6:  # 30度
+        if abs(heading_error) > np.pi / 2:  # 30度
             throttle *= 0.5
             if speed > min_speed_for_forced_brake:
                 brake = max(brake, 0.3)
         
         # 当偏离车道较远时，减速
-        if distance_to_center > 1.5:
+        if distance_to_center > 3:
             throttle *= 0.5
             if speed > min_speed_for_forced_brake:
                 brake = max(brake, 0.2)

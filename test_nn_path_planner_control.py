@@ -202,7 +202,7 @@ def main() -> None:
     p.add_argument(
         "--print_pred_every",
         type=int,
-        default=50,
+        default=25,
         help="Print predicted vs env target every N steps (0 disables).",
     )
 
@@ -211,7 +211,7 @@ def main() -> None:
     p.add_argument(
         "--debug_draw_every",
         type=int,
-        default=1,
+        default=10,
         help="Draw predicted path every N steps (default: 1).",
     )
     p.add_argument(
